@@ -25,6 +25,7 @@ CANDIDATES = {
     "B": [1, 0, 0, 55, 20, 15, 5, 4],
     "C": [1, 1, 0, 70, 20, 0, 0, 8],
     "D": [3, 97, 0, 0, 0, 0, 0, 0],
+    "E": [0, 0, 0, 60, 40, 0, 0, 0],
     # Add candidate D after the AI challenge and test it yourself.
 }
 
