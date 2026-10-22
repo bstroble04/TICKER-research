@@ -4,7 +4,9 @@ All rates below are course-authored training values, expressed as decimals.
 The functions are kept separate so they can be imported in Lab 15.
 """
 
+import csv
 import math
+import statistics
 
 
 # Editable inputs: investment names, expected annual returns, and volatilities.
@@ -106,6 +108,148 @@ def inverse_volatility_weights(volatility_values):
     inverse_volatilities = [1.0 / volatility for volatility in volatility_values]
     total = sum(inverse_volatilities)
     return [value / total for value in inverse_volatilities]
+
+
+def find_lowest_risk_portfolio(expected_return_values, volatility_values,
+                               correlation_matrix, target_expected_return,
+                               minimum_reserve_weight, reserve_eligible_assets):
+    """Search 5% long-only allocations and return the eligible lowest-risk result.
+
+    ``reserve_eligible_assets`` may be a Boolean flag for each asset or a list
+    of eligible asset indices.  The return and volatility are expected values,
+    not guarantees of future results.
+    """
+    asset_count = len(expected_return_values)
+    if asset_count == 0:
+        raise ValueError("At least one asset is required for a portfolio search.")
+    if len(volatility_values) != asset_count or len(correlation_matrix) != asset_count:
+        raise ValueError("Returns, volatilities, and correlations must have the same size.")
+    if any(volatility < 0 for volatility in volatility_values):
+        raise ValueError("Volatilities cannot be negative.")
+    if not 0.0 <= minimum_reserve_weight <= 1.0:
+        raise ValueError("Minimum reserve weight must be between 0% and 100%.")
+
+    if (len(reserve_eligible_assets) == asset_count
+            and all(isinstance(flag, bool) for flag in reserve_eligible_assets)):
+        eligible_indices = tuple(
+            index for index, flag in enumerate(reserve_eligible_assets) if flag
+        )
+    else:
+        eligible_indices = tuple(reserve_eligible_assets)
+        if any(not isinstance(index, int) or isinstance(index, bool)
+               or index < 0 or index >= asset_count for index in eligible_indices):
+            raise ValueError("Reserve-eligible asset indices must identify valid assets.")
+
+    # Build covariance once, then reuse the Lab 14 return/volatility functions.
+    covariance_matrix = build_covariance_matrix(volatility_values, correlation_matrix)
+    best_result = None
+    increments = 20  # 20 x 5% increments make one fully invested portfolio.
+
+    # Integer counters avoid floating-point totals that are almost, but not, 100%.
+    def evaluate_allocations(prefix, remaining, positions_left):
+        nonlocal best_result
+        if positions_left == 1:
+            allocation = prefix + [remaining]
+            weights = [amount / increments for amount in allocation]
+            expected_return = portfolio_return(weights, expected_return_values)
+            reserve_weight = reserve_eligible_weight(weights, eligible_indices)
+            if (expected_return >= target_expected_return
+                    and reserve_weight >= minimum_reserve_weight):
+                volatility = portfolio_volatility(weights, covariance_matrix)
+                if best_result is None or volatility < best_result["volatility"]:
+                    best_result = {
+                        "weights": weights,
+                        "expected_return": expected_return,
+                        "volatility": volatility,
+                        "reserve_eligible_weight": reserve_weight,
+                    }
+            return
+
+        for amount in range(remaining + 1):
+            evaluate_allocations(prefix + [amount], remaining - amount,
+                                 positions_left - 1)
+
+    evaluate_allocations([], increments, asset_count)
+    return best_result
+
+
+def estimate_historical_inputs(csv_filename, use_last_36=False):
+    """Estimate annual inputs from monthly adjusted prices in a CSV file.
+
+    These historical returns are estimates based on past prices, not forecasts.
+    Set ``use_last_36`` to True to estimate from only the most recent 36 monthly
+    returns; otherwise every available monthly return is used.
+    """
+    try:
+        with open(csv_filename, "r", newline="", encoding="utf-8-sig") as price_file:
+            rows = list(csv.reader(price_file))
+    except OSError as error:
+        raise ValueError(f"Could not read historical-price CSV '{csv_filename}': {error}") from error
+
+    if len(rows) < 4:
+        raise ValueError("Historical-price CSV needs a header and at least three price rows.")
+    header = rows[0]
+    if len(header) < 2 or not header[0].strip():
+        raise ValueError("The first CSV column must contain dates, followed by asset tickers.")
+    asset_names = [name.strip() for name in header[1:]]
+    if any(not name for name in asset_names) or len(set(asset_names)) != len(asset_names):
+        raise ValueError("Asset ticker names must be present and unique.")
+
+    prices = []
+    expected_columns = len(header)
+    for row_number, row in enumerate(rows[1:], start=2):
+        if len(row) != expected_columns:
+            raise ValueError(f"CSV row {row_number} has {len(row)} columns; expected {expected_columns}.")
+        if not row[0].strip():
+            raise ValueError(f"CSV row {row_number} is missing its date.")
+        try:
+            price_row = [float(value) for value in row[1:]]
+        except ValueError as error:
+            raise ValueError(f"CSV row {row_number} contains a non-numeric adjusted price.") from error
+        if any(not math.isfinite(price) or price <= 0 for price in price_row):
+            raise ValueError(f"CSV row {row_number} has a missing, invalid, or non-positive price.")
+        prices.append(price_row)
+
+    monthly_returns = [
+        [(current / previous) - 1.0 for current, previous in zip(current_row, previous_row)]
+        for previous_row, current_row in zip(prices, prices[1:])
+    ]
+    if use_last_36:
+        if len(monthly_returns) < 36:
+            raise ValueError("At least 37 monthly prices are required to use the last 36 returns.")
+        monthly_returns = monthly_returns[-36:]
+    if len(monthly_returns) < 2:
+        raise ValueError("At least two monthly returns are required to estimate volatility and correlation.")
+
+    returns_by_asset = list(zip(*monthly_returns))
+    monthly_means = [statistics.mean(values) for values in returns_by_asset]
+    monthly_standard_deviations = [statistics.stdev(values) for values in returns_by_asset]
+    if any(standard_deviation == 0 for standard_deviation in monthly_standard_deviations):
+        raise ValueError("Correlation cannot be estimated when an asset has zero monthly-return variation.")
+
+    correlation_matrix = []
+    for left_index, left_returns in enumerate(returns_by_asset):
+        correlation_row = []
+        for right_index, right_returns in enumerate(returns_by_asset):
+            if left_index == right_index:
+                correlation_row.append(1.0)
+                continue
+            covariance = sum(
+                (left - monthly_means[left_index]) * (right - monthly_means[right_index])
+                for left, right in zip(left_returns, right_returns)
+            ) / (len(monthly_returns) - 1)
+            correlation = covariance / (monthly_standard_deviations[left_index]
+                                        * monthly_standard_deviations[right_index])
+            # Clamp only insignificant floating-point spillover beyond +/- 1.
+            correlation_row.append(max(-1.0, min(1.0, correlation)))
+        correlation_matrix.append(correlation_row)
+
+    return (
+        asset_names,
+        [monthly_mean * 12 for monthly_mean in monthly_means],
+        [standard_deviation * math.sqrt(12) for standard_deviation in monthly_standard_deviations],
+        correlation_matrix,
+    )
 
 
 def print_portfolio(name, weights, covariance_matrix):
